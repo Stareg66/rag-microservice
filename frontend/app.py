@@ -1,16 +1,13 @@
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox
 import threading
+import requests
 
-from services.pdf_loader import PDFLoader
-from services.preprocess import Preprocess
-from services.embeddings import EmbeddingService
-from services.vector_store import Storage
-
-
-class App:
+class RAGClient:
 
     def __init__(self):
+        self.api_base = "http://localhost:8000"
+
         self.root = tk.Tk()
         self.root.title("📚 RAG Assistant - PDF Q&A")
         self.root.geometry("900x700")
@@ -24,21 +21,24 @@ class App:
 
         self.root.configure(bg=self.bg_color)
 
-        # Services
-        self.loader = PDFLoader()
-        self.embedder = EmbeddingService()
-        self.storage = Storage()
-        self.preprocess = Preprocess()
-
-        self.storage.initialize_database()
-        self.embedder.load_model()
-
         # Variables
         self.pdf_loaded = False
-        self.chunks_count = 0
+
+        # Check API connection
+        self.check_api_connection()
 
         # GUI
         self.create_widgets()
+
+    def check_api_connection(self):
+        try:
+            response = requests.get(f"{self.api_base}/health", timeout=2)
+            if response.status_code != 200:
+                messagebox.showerror("Error", "⚠️ API not available")
+                self.root.quit()
+        except:
+            messagebox.showerror("Error", "⚠️ Cant connecto to API")
+            self.root.quit()
 
     def create_widgets(self):
         # Grid
@@ -60,12 +60,16 @@ class App:
         action_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=20)
 
         # Button load PDF
-        self.load_btn = tk.Button(action_frame, text="📄 Load PDF", command=self.load_pdf_thread, bg=self.accent_color, fg="white", font=("Arial", 11, "bold"), width=15, height=2)
+        self.load_btn = tk.Button(action_frame, text="📄 Load PDF", command=self.upload_pdf_thread, bg=self.accent_color, fg="white", font=("Arial", 11, "bold"), width=15, height=2)
         self.load_btn.pack(side="left", padx=5)
 
         # Info PDF
         self.pdf_info_label = tk.Label(action_frame, text="No PDF loaded", bg=self.bg_color, fg="#95A5A6", font=("Arial", 10))
         self.pdf_info_label.pack(side="left", padx=15)
+
+        # Botón limpiar BD
+        self.clear_btn = tk.Button(action_frame, text="🗑️ Clear Database", command=self.clear_database, bg="#E74C3C", fg="white", font=("Arial", 10))
+        self.clear_btn.pack(side="right", padx=5)
 
         # -- Query --
         query_frame = tk.Frame(self.root, bg=self.bg_color)
@@ -112,29 +116,32 @@ class App:
         self.output.pack(side="left", fill="both", expand=True)
         scrollbar.config(command=self.output.yview)
 
-         # Mensaje inicial
+        # Mensaje inicial
         self.output.insert("1.0", "👋 Welcome to RAG Assistant!\n\n" +
+                          "🔗 Connected to API: " + self.api_base + "\n\n" +
                           "📖 How to use:\n" +
-                          "  1. Click 'Load PDF' to upload a document\n" +
-                          "  2. Wait for processing (chunking + embeddings)\n" +
+                          "  1. Click 'Upload PDF' to upload a document\n" +
+                          "  2. Wait for processing\n" +
                           "  3. Type your search query\n" +
                           "  4. Press Enter or click 'Search'\n\n" +
-                          "💡 The system will find the most relevant sections of your PDF!")
+                          "💡 The API will find the most relevant sections!")
         self.output.config(state="disabled")
 
     def lock_ui(self):
         self.load_btn.config(state="disabled")
         self.search_btn.config(state="disabled")
+        self.clear_btn.config(state="disabled")
 
     def unlock_ui(self):
         self.load_btn.config(state="normal")
         self.search_btn.config(state="normal")
+        self.clear_btn.config(state="normal")
 
-    def load_pdf_thread(self):
-        thread = threading.Thread(target=self.load_pdf, daemon=True)
+    def upload_pdf_thread(self):
+        thread = threading.Thread(target=self.upload_pdf, daemon=True)
         thread.start()
 
-    def load_pdf(self):
+    def upload_pdf(self):
         path = filedialog.askopenfilename(
             title="Select PDF",
             filetypes=[("PDF files", "*.pdf")]
@@ -143,101 +150,119 @@ class App:
             return
         
         self.lock_ui()
-        self.update_output("⏳ Loading PDF...\n")
-
+        self.update_output("⏳ Uploading PDF to server...\n")
+        
         try:
-            # Load and process
-            text = self.loader.load_pdf(path)
-            if not text:
-                raise Exception("Could not extract text from PDF")
+            # Subir archivo
+            with open(path, 'rb') as f:
+                files = {'file': (path.split('/')[-1], f, 'application/pdf')}
+                response = requests.post(f"{self.api_base}/upload-pdf", files=files)
             
-            self.update_output("⏳ Cleaning text...\n")
-            text = self.preprocess.clean_text(text)
-            
-            self.update_output("⏳ Creating chunks...\n")
-            chunks = self.preprocess.chunk_text(text, chunk_size=500, overlap=80)
-
-            self.update_output("⏳ Generating embeddings...\n")
-            embeddings = self.embedder.generate_embeddings(chunks)
-            
-            self.update_output("⏳ Storing in database...\n")
-            self.storage.insert_chunks(chunks, embeddings)
-
-            # Actualizar estado
-            self.pdf_loaded = True
-            self.chunks_count = len(chunks)
-            
-            filename = path.split("/")[-1]
-            self.pdf_info_label.config(
-                text=f"✅ {filename} ({len(chunks)} chunks)",
-                fg="#27AE60"
-            )
-            
-            self.update_output(f"✅ PDF indexed successfully!\n\n" +
-                             f"📊 Statistics:\n" +
-                             f"  • File: {filename}\n" +
-                             f"  • Chunks: {len(chunks)}\n" +
-                             f"  • Total characters: {len(text):,}\n" +
-                             f"  • Database entries: {self.storage.collection.count()}\n\n" +
-                             f"🎯 Ready to search! Type your query above.")
-
+            if response.status_code == 200:
+                data = response.json()
+                
+                self.pdf_loaded = True
+                filename = data['filename']
+                chunks = data['chunks_count']
+                
+                self.pdf_info_label.config(
+                    text=f"✅ {filename} ({chunks} chunks)",
+                    fg="#27AE60"
+                )
+                
+                self.update_output(f"✅ PDF uploaded successfully!\n\n" +
+                                 f"📊 Statistics:\n" +
+                                 f"  • File: {filename}\n" +
+                                 f"  • Chunks: {chunks}\n\n" +
+                                 f"🎯 Ready to search!")
+            else:
+                error = response.json().get('detail', 'Unknown error')
+                messagebox.showerror("Error", f"❌ {error}")
+                self.update_output(f"❌ Error: {error}\n")
+        
         except Exception as e:
             messagebox.showerror("Error", f"❌ {str(e)}")
-            self.update_output(f"❌ Error loading PDF:\n{str(e)}\n")
-            self.pdf_info_label.config(text="❌ Error loading PDF", fg="#E74C3C")
-
+            self.update_output(f"❌ Error: {str(e)}\n")
+        
         finally:
             self.unlock_ui()
 
     def search_query(self):
         if not self.pdf_loaded:
-            messagebox.showwarning("Warning", "⚠️ Load a PDF first!")
+            messagebox.showwarning("Warning", "⚠️ Upload a PDF first!")
             return
         
         query = self.query_box.get().strip()
         if not query:
             messagebox.showwarning("Warning", "⚠️ Write a search query")
             return
-
+        
         self.lock_ui()
         self.update_output(f"🔍 Searching: '{query}'\n\n")
-
+        
         try:
-            # Generate query embeddings
-            query_emb = self.embedder.generate_embeddings([query])
-            
-            # Obtain number of results
+            # Call API
             num_results = int(self.num_results.get())
+            payload = {
+                "query": query,
+                "top_k": num_results
+            }
             
-            # Search relevant chunks
-            results = self.storage.query(query_emb, top_k=num_results)
-            chunks = results["documents"][0]
-            distances = results["distances"][0]
+            response = requests.post(f"{self.api_base}/search", json=payload)
             
-            if not chunks:
-                self.update_output("❌ No results found.\n")
-                return
-            
-            # Show results
-            output_text = f"🔍 Query: '{query}'\n"
-            output_text += f"📊 Found {len(chunks)} relevant chunks:\n\n"
-            output_text += "=" * 60 + "\n\n"
-            
-            for i, (chunk, distance) in enumerate(zip(chunks, distances), 1):
-                similarity = 1 - distance  # Convertir distancia a similitud
-                output_text += f"📄 Result {i} (Similarity: {similarity:.2%})\n"
-                output_text += "─" * 60 + "\n"
-                output_text += f"{chunk}\n\n"
+            if response.status_code == 200:
+                data = response.json()
+                chunks = data['chunks']
+                distances = data['distances']
+                
+                # Show results
+                output_text = f"🔍 Query: '{query}'\n"
+                output_text += f"📊 Found {len(chunks)} relevant chunks:\n\n"
                 output_text += "=" * 60 + "\n\n"
-            
-            self.update_output(output_text)
-
+                
+                for i, (chunk, distance) in enumerate(zip(chunks, distances), 1):
+                    similarity = 1 - distance
+                    output_text += f"📄 Result {i} (Similarity: {similarity:.2%})\n"
+                    output_text += "─" * 60 + "\n"
+                    output_text += f"{chunk}\n\n"
+                    output_text += "=" * 60 + "\n\n"
+                
+                self.update_output(output_text)
+            else:
+                error = response.json().get('detail', 'Unknown error')
+                messagebox.showerror("Error", f"❌ {error}")
+                self.update_output(f"❌ Error: {error}\n")
+        
         except Exception as e:
             messagebox.showerror("Error", f"❌ {str(e)}")
-            self.update_output(f"❌ Error during search:\n{str(e)}\n")
-
+            self.update_output(f"❌ Error: {str(e)}\n")
+        
         finally:
             self.unlock_ui()
+
+    def clear_database(self):
+        response = messagebox.askyesno(
+            "Confirm", 
+            "🗑️ This will delete all stored documents.\n\nAre you sure?"
+        )
+        
+        if response:
+            try:
+                resp = requests.delete(f"{self.api_base}/clear")
+                
+                if resp.status_code == 200:
+                    self.pdf_loaded = False
+                    self.pdf_info_label.config(text="No documents loaded", fg="#95A5A6")
+                    
+                    self.update_output("✅ Database cleared successfully!\n\n" +
+                                     "Upload a new PDF to start.")
+                    
+                    messagebox.showinfo("Success", "✅ Database cleared!")
+                else:
+                    messagebox.showerror("Error", "Error clearing database")
+            
+            except Exception as e:
+                messagebox.showerror("Error", f"❌ {str(e)}")
 
     def update_output(self, text):
         self.output.config(state="normal")
@@ -251,4 +276,4 @@ class App:
 
 
 if __name__ == "__main__":
-    App().run()
+    RAGClient().run()
