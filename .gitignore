@@ -5,3 +5,4 @@ test.py
 .venv/
 env/
 chroma_db
+backend/chroma_db
