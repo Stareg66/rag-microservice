@@ -2,12 +2,16 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import os
 import shutil
+import logging
 
 from services.pdf_loader import PDFLoader
 from services.preprocess import Preprocess
 from services.embeddings import EmbeddingService
 from services.vector_store import Storage
-from models import SearchRequest, SearchResult, PDFUploadResponse
+from services.llm_service import LLMService
+from models import SearchRequest, SearchResult, PDFUploadResponse, AskRequest, AskResponse, ModelsResponse
+
+logging.basicConfig(level=logging.DEBUG)
 
 # Create app
 app = FastAPI(
@@ -30,6 +34,7 @@ loader = PDFLoader()
 preprocess = Preprocess()
 embedder = EmbeddingService()
 storage = Storage()
+llmservice = LLMService()
 
 # Create data/pdf folder
 os.makedirs("./data/pdfs", exist_ok=True)
@@ -123,6 +128,37 @@ async def clear_database():
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
+
+@app.post("/models", response_model=ModelsResponse)
+async def get_models(api_key: str):
+    models = llmservice.get_available_models(api_key)
+    if not models:
+        raise HTTPException(status_code=400, detail="Error obtaining models from OpenRouter")
+    return ModelsResponse(models=models)
+
+@app.post("/ask", response_model=AskResponse)
+async def ask_question(request: AskRequest):
+    if storage.collection.count() == 0:
+        raise HTTPException(status_code=400, detail="No indexed documents")
+    
+    try:
+        # Generate query embedding
+        query_emb = embedder.generate_embeddings([request.query])
+        
+        # Search relevant chunks
+        results = storage.query(query_emb, top_k=request.top_k)
+        chunks = results["documents"][0]
+        
+        # Generate LLM response
+        answer = llmservice.generate_answer(request.query, chunks, request.model, request.api_key)
+        
+        return AskResponse(
+            answer=answer,
+            chunks=chunks
+        )
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
